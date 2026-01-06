@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Lockdown Control (Prototype)</title>
 <style>
-  html, body { margin:0; padding:0; background:#000; color:#d6ffd6; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+  html, body { margin:0; padding:0; background:#000; color:#d6ffd6; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial; user-select:none; }
   #wrap { display:flex; justify-content:center; align-items:center; min-height:100vh; flex-direction:column; gap:10px; }
   canvas { background:#050505; border:2px solid #1cff7a33; border-radius:12px; }
   .panel { width:min(980px, 96vw); display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between; }
@@ -23,7 +23,10 @@
   <div class="panel">
     <div class="box">
       <div class="title">LOCKDOWN CONTROL</div>
-      <div class="muted">Aim flashlight with mouse. Toggle flashlight: <b>F</b>. Toggle doors: click door bars (near center). No backups.</div>
+      <div class="muted">
+        Aim flashlight with mouse. Toggle flashlight: <b>F</b>. Toggle traps: click the trap bars. No backups.
+        <br/>Close a trap when an enemy is close to it to <b>capture</b> them.
+      </div>
     </div>
 
     <div class="box row" id="menuBox">
@@ -65,48 +68,44 @@
   const hardBtn = document.getElementById("hardBtn");
   const nightBtn= document.getElementById("nightBtn");
 
-  // ====== Your rules, encoded ======
+  // ===== Your rules =====
   const DIFFS = {
-    easy:     { total: 2,  speed: 0.070 },   // slow
-    medium:   { total: 4,  speed: 0.095 },   // ok
-    hard:     { total: 7,  speed: 0.120 },   // medium-fast
-    nightmare:{ total: 10, speed: 0.150 },   // fast
+    easy:      { total: 2,  speed: 0.070 }, // slow
+    medium:    { total: 4,  speed: 0.095 }, // ok
+    hard:      { total: 7,  speed: 0.120 }, // medium-fast
+    nightmare: { total: 10, speed: 0.150 }, // fast
   };
 
-  // Drain rules per your spec
-  const FLASH_DRAIN_PER_SEC = 0.1; // 0.1% per second when flashlight ON
-  const DOOR_DRAIN_PER_SEC  = 0.2; // 0.2% per second per closed door IF enemies in that section
+  // Drain rules
+  const FLASH_DRAIN_PER_SEC = 0.1; // 0.1%/sec while flashlight ON
+  const DOOR_DRAIN_PER_SEC  = 0.2; // 0.2%/sec per CLOSED door IF enemies in that section
 
-  // Flashlight beam size (small so you must find individually)
+  // Flashlight beam (small so you find enemies individually)
   const BEAM_RADIUS = 42;
 
-  // Door location in each corridor (near center). Enemies stop here if door closed + door battery > 0.
-  const DOOR_PROGRESS = 0.78; // 0 far -> 1 at control room
+  // Door position (near control room)
+  const DOOR_PROGRESS = 0.78;
 
-  // Lose when enemy reaches center (>= 1)
+  // Capture zone: enemy must be close enough to the door when you close it
+  // (this makes the trap feel fair + skill based)
+  const CAPTURE_MIN_PROGRESS = 0.68;
+
   const LOSE_PROGRESS = 1.0;
 
-  // ====== Layout: 5 sections around center ======
+  // ===== Layout =====
   const center = { x: canvas.width/2, y: canvas.height/2 + 10 };
   const roomRadius = 68;
 
-  // Angles for 5 sections (degrees around you)
-  // Top, top-right, bottom-right, bottom-left, top-left-ish
   const sectionAngles = [
-    -90,   // S1
-    -18,   // S2
-     54,   // S3
-    126,   // S4
-    198    // S5
+    -90,  -18,   54,  126,  198
   ].map(d => d * Math.PI/180);
 
   const corridorLen = 250;
   const corridorWidth = 92;
 
-  // Door click bars (computed each frame)
-  let doorRects = []; // {x,y,w,h, idx}
+  let doorRects = []; // click targets
 
-  // ====== State ======
+  // ===== State =====
   let running = false;
   let difficulty = null;
 
@@ -116,36 +115,26 @@
 
   let mouse = { x: center.x, y: center.y, inside: false };
 
-  // doors per section
   const doors = new Array(5).fill(0).map(() => ({ closed:false }));
 
   // enemies: { section, progress, lateral, id }
-  // progress: 0 at far end, increases toward 1 at control room
-  // lateral: -1..1 offset across corridor width so you must aim precisely
   let enemies = [];
 
-  // ====== Helpers ======
+  // ===== Helpers =====
   function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
   function dist(ax, ay, bx, by) { return Math.hypot(ax-bx, ay-by); }
 
   function sectionToWorld(sectionIdx, progress, lateral) {
-    // Compute a point along corridor axis from outer end -> center
     const ang = sectionAngles[sectionIdx];
-
-    // Outer end point
     const outerX = center.x + Math.cos(ang) * (roomRadius + corridorLen);
     const outerY = center.y + Math.sin(ang) * (roomRadius + corridorLen);
-
-    // Inner point near room boundary
     const innerX = center.x + Math.cos(ang) * (roomRadius + 10);
     const innerY = center.y + Math.sin(ang) * (roomRadius + 10);
 
-    // Interpolate along corridor from outer -> inner based on progress (0..1)
     const t = clamp(progress, 0, 1);
     const x = outerX + (innerX - outerX) * t;
     const y = outerY + (innerY - outerY) * t;
 
-    // Lateral offset perpendicular to corridor axis
     const px = -Math.sin(ang);
     const py =  Math.cos(ang);
 
@@ -154,8 +143,7 @@
   }
 
   function enemyIsIlluminated(enemy) {
-    if (!flashlightOn) return false;
-    if (flashlightBattery <= 0) return false;
+    if (!flashlightOn || flashlightBattery <= 0) return false;
     const p = sectionToWorld(enemy.section, enemy.progress, enemy.lateral);
     return dist(p.x, p.y, mouse.x, mouse.y) <= BEAM_RADIUS;
   }
@@ -165,21 +153,16 @@
   }
 
   function computeDistribution(diffKey) {
-    // EXACT distributions per your message
     if (diffKey === "easy") {
-      // 2 enemies total, 1 per room max: pick 2 distinct sections
       return [1,1,0,0,0].sort(() => Math.random()-0.5);
     }
     if (diffKey === "medium") {
-      // 4 enemies total, 1 per room max: 4 distinct sections
       return [1,1,1,1,0].sort(() => Math.random()-0.5);
     }
     if (diffKey === "hard") {
-      // 7 enemies total: 2/2/2/1/0 across 5 rooms
       return [2,2,2,1,0].sort(() => Math.random()-0.5);
     }
-    // nightmare: 10 total, 2 in each room
-    return [2,2,2,2,2];
+    return [2,2,2,2,2]; // nightmare
   }
 
   function spawnEnemies(diffKey) {
@@ -190,10 +173,7 @@
     for (let s = 0; s < 5; s++) {
       const count = distArr[s];
       for (let k = 0; k < count; k++) {
-        // Start enemies near the far end, but with some variety
         const startProg = 0.00 + Math.random()*0.12;
-        // lateral placement - makes you "find them individually"
-        // if 2 enemies in a room, separate them laterally
         let lat = (count === 2)
           ? (k === 0 ? -0.55 : 0.55)
           : (Math.random()*1.1 - 0.55);
@@ -206,8 +186,6 @@
         });
       }
     }
-
-    // Shuffle to avoid predictable order
     return list.sort(() => Math.random() - 0.5);
   }
 
@@ -220,28 +198,51 @@
     doorRects = [];
   }
 
-  // ====== Input ======
+  // ===== Input =====
   canvas.addEventListener("mousemove", (e) => {
     const r = canvas.getBoundingClientRect();
     mouse.x = e.clientX - r.left;
     mouse.y = e.clientY - r.top;
     mouse.inside = (mouse.x >= 0 && mouse.x <= canvas.width && mouse.y >= 0 && mouse.y <= canvas.height);
   });
-
   canvas.addEventListener("mouseleave", () => mouse.inside = false);
 
+  // TRAP CLICK: close/open + CAPTURE
   canvas.addEventListener("click", (e) => {
     if (!running) return;
-    // Toggle door by clicking door bar
     const r = canvas.getBoundingClientRect();
     const mx = e.clientX - r.left;
     const my = e.clientY - r.top;
 
     for (const dr of doorRects) {
       if (mx >= dr.x && mx <= dr.x + dr.w && my >= dr.y && my <= dr.y + dr.h) {
-        // No battery backup; if door battery is 0, doors are failed open
-        if (doorBattery <= 0) return;
-        doors[dr.idx].closed = !doors[dr.idx].closed;
+        if (doorBattery <= 0) return; // doors failed open when 0
+
+        const idx = dr.idx;
+        const wasClosed = doors[idx].closed;
+        doors[idx].closed = !wasClosed;
+
+        // If we JUST CLOSED it, capture enemies that are close enough to the door.
+        if (!wasClosed && doors[idx].closed) {
+          const before = enemies.length;
+
+          enemies = enemies.filter(en => {
+            if (en.section !== idx) return true;
+            // capture only if enemy is close enough to the door (skill timing)
+            return en.progress < CAPTURE_MIN_PROGRESS;
+          });
+
+          const captured = before - enemies.length;
+          // Update enemy count on HUD immediately
+          enemyVal.textContent = enemies.length.toString();
+
+          // Optional tiny feedback without spoilers
+          if (captured > 0) {
+            // quick flash text using title (simple)
+            document.title = `Captured ${captured}!`;
+            setTimeout(() => { document.title = "Lockdown Control (Prototype)"; }, 400);
+          }
+        }
         return;
       }
     }
@@ -254,11 +255,7 @@
     }
   });
 
-  // ====== Menu controls ======
-  function lockMenuButtons(lock) {
-    [easyBtn, medBtn, hardBtn, nightBtn].forEach(b => b.disabled = lock);
-  }
-
+  // ===== Menu =====
   function start(diffKey) {
     resetAll();
     difficulty = diffKey;
@@ -286,27 +283,42 @@
     running = false;
     menuBox.style.display = "flex";
     hudBox.style.display = "none";
-    lockMenuButtons(false);
     resetAll();
-    draw(0);
+    draw();
   };
 
-  // ====== Main loop ======
+  // ===== Loop =====
   let lastTime = performance.now();
+
+  function win() {
+    running = false;
+    alert("YOU WIN — All enemies were contained.");
+    menuBox.style.display = "flex";
+    hudBox.style.display = "none";
+    resetAll();
+    draw();
+  }
+
+  function gameOver() {
+    running = false;
+    alert("YOU LOST — An enemy reached the control room.");
+    menuBox.style.display = "flex";
+    hudBox.style.display = "none";
+    resetAll();
+    draw();
+  }
 
   function update(dt) {
     if (!difficulty) return;
 
-    // Flashlight drain: 0.1% per second while ON
+    // Flashlight drain
     if (flashlightOn && flashlightBattery > 0) {
       flashlightBattery -= FLASH_DRAIN_PER_SEC * dt;
       flashlightBattery = clamp(flashlightBattery, 0, 100);
-      if (flashlightBattery <= 0) {
-        flashlightOn = false;
-      }
+      if (flashlightBattery <= 0) flashlightOn = false;
     }
 
-    // Door drain: 0.2% per second per CLOSED door *only if that section has enemies*
+    // Door drain: per closed door only if enemies in that section
     if (doorBattery > 0) {
       let drainingDoors = 0;
       for (let s = 0; s < 5; s++) {
@@ -318,64 +330,56 @@
       }
     }
 
-    // If door battery hits 0: doors fail open permanently (your earlier rule)
+    // Door battery 0 => doors fail open
     if (doorBattery <= 0) {
       for (let s = 0; s < 5; s++) doors[s].closed = false;
     }
 
-    // Move enemies unless illuminated (freeze) or blocked by closed door
-    const spd = DIFFS[difficulty].speed; // per-second progress increment
+    // Move enemies unless illuminated; doors block at the door line
+    const spd = DIFFS[difficulty].speed;
 
     for (const e of enemies) {
       const lit = enemyIsIlluminated(e);
+      if (lit) continue; // frozen when lit
 
-      if (lit) continue; // frozen while flashlight is directly on them
-
-      // If door is closed and powered, enemy cannot pass DOOR_PROGRESS
       const doorClosed = doors[e.section].closed && doorBattery > 0;
 
+      // If door closed, enemy cannot pass the door line
       if (doorClosed && e.progress >= DOOR_PROGRESS) {
-        e.progress = DOOR_PROGRESS; // hold them at the door
+        e.progress = DOOR_PROGRESS;
         continue;
       }
 
       e.progress += spd * dt;
 
-      // Lose if any reaches the control room
       if (e.progress >= LOSE_PROGRESS) {
         gameOver();
         return;
       }
     }
-  }
 
-  function gameOver() {
-    running = false;
-    alert("YOU LOST — An enemy reached the control room.");
-    // Return to menu
-    menuBox.style.display = "flex";
-    hudBox.style.display = "none";
-    lockMenuButtons(false);
-    resetAll();
-    draw(0);
+    // Win if all enemies captured
+    if (enemies.length === 0) {
+      win();
+      return;
+    }
   }
 
   function loop(now) {
     if (!running) return;
-    const dt = (now - lastTime) / 1000; // seconds
+    const dt = (now - lastTime) / 1000;
     lastTime = now;
 
     update(dt);
-    draw(dt);
-
+    draw();
     requestAnimationFrame(loop);
   }
 
-  // ====== Drawing ======
+  // ===== Draw =====
   function draw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Background grid-ish glow
+    // grid glow
     ctx.save();
     ctx.globalAlpha = 0.10;
     ctx.strokeStyle = "#1cff7a";
@@ -387,7 +391,6 @@
     }
     ctx.restore();
 
-    // Draw corridors + section labels + doors (click targets)
     doorRects = [];
 
     for (let s = 0; s < 5; s++) {
@@ -395,7 +398,6 @@
       const ax = Math.cos(ang), ay = Math.sin(ang);
       const px = -Math.sin(ang), py = Math.cos(ang);
 
-      // Corridor polygon
       const innerX = center.x + ax*(roomRadius + 10);
       const innerY = center.y + ay*(roomRadius + 10);
       const outerX = center.x + ax*(roomRadius + corridorLen);
@@ -424,7 +426,7 @@
       ctx.stroke();
       ctx.restore();
 
-      // Section label near outer end
+      // label
       ctx.save();
       ctx.fillStyle = "#b6ffcf";
       ctx.font = "14px monospace";
@@ -432,38 +434,31 @@
       ctx.fillText(`S${s+1}`, outerX - 10, outerY - 10);
       ctx.restore();
 
-      // Door bar position at DOOR_PROGRESS
+      // door/trap bar at DOOR_PROGRESS
       const doorPoint = sectionToWorld(s, DOOR_PROGRESS, 0);
       const barW = corridorWidth * 0.72;
       const barH = 12;
 
-      // Door rect oriented roughly perpendicular: draw as axis-aligned for clicking simplicity
-      const dr = {
-        idx: s,
-        x: doorPoint.x - barW/2,
-        y: doorPoint.y - barH/2,
-        w: barW,
-        h: barH
-      };
+      const dr = { idx:s, x:doorPoint.x - barW/2, y:doorPoint.y - barH/2, w:barW, h:barH };
       doorRects.push(dr);
 
-      // Draw door bar
-      const doorIsClosed = doors[s].closed && doorBattery > 0;
+      const closed = doors[s].closed && doorBattery > 0;
+
       ctx.save();
-      ctx.fillStyle = doorIsClosed ? "#1cff7a" : "#1cff7a22";
+      ctx.fillStyle = closed ? "#1cff7a" : "#1cff7a22";
       ctx.strokeStyle = "#1cff7a66";
       ctx.lineWidth = 2;
       ctx.fillRect(dr.x, dr.y, dr.w, dr.h);
       ctx.strokeRect(dr.x, dr.y, dr.w, dr.h);
 
       ctx.fillStyle = "#041006";
-      ctx.globalAlpha = doorIsClosed ? 0.95 : 0.55;
+      ctx.globalAlpha = closed ? 0.95 : 0.55;
       ctx.font = "11px monospace";
-      ctx.fillText(doorIsClosed ? "TRAP CLOSED" : "TRAP OPEN", dr.x + 8, dr.y + 9);
+      ctx.fillText(closed ? "TRAP CLOSED" : "TRAP OPEN", dr.x + 8, dr.y + 9);
       ctx.restore();
     }
 
-    // Draw control room
+    // control room
     ctx.save();
     ctx.fillStyle = "#071a10";
     ctx.strokeStyle = "#1cff7a88";
@@ -472,13 +467,12 @@
     ctx.arc(center.x, center.y, roomRadius, 0, Math.PI*2);
     ctx.fill();
     ctx.stroke();
-
     ctx.fillStyle = "#caffdd";
     ctx.font = "16px monospace";
     ctx.fillText("CONTROL ROOM", center.x - 68, center.y + 6);
     ctx.restore();
 
-    // Draw flashlight beam (small circle you aim)
+    // flashlight beam
     if (running && flashlightOn && flashlightBattery > 0 && mouse.inside) {
       ctx.save();
       ctx.globalAlpha = 0.16;
@@ -496,21 +490,18 @@
       ctx.restore();
     }
 
-    // Draw enemies ONLY if beam hits them (must find individually)
+    // enemies visible ONLY when directly lit
     for (const e of enemies) {
       const p = sectionToWorld(e.section, e.progress, e.lateral);
       const lit = enemyIsIlluminated(e);
-
-      if (!lit) continue; // invisible unless directly lit
+      if (!lit) continue;
 
       ctx.save();
-      // Enemy dot
       ctx.fillStyle = "#ff2a2a";
       ctx.beginPath();
       ctx.arc(p.x, p.y, 10, 0, Math.PI*2);
       ctx.fill();
 
-      // Tiny “freeze” indicator
       ctx.strokeStyle = "#ffd1d1";
       ctx.lineWidth = 2;
       ctx.beginPath();
@@ -523,13 +514,13 @@
       ctx.restore();
     }
 
-    // HUD update
     flashVal.textContent = `${flashlightBattery.toFixed(1)}%`;
     doorVal.textContent  = `${doorBattery.toFixed(1)}%`;
+    if (enemyVal) enemyVal.textContent = enemies.length.toString();
   }
 
-  // First draw (menu screen)
-  draw(0);
+  // first draw
+  draw();
 })();
 </script>
 </body>
